@@ -8,6 +8,7 @@ worth pinning is ours, not python-telegram-bot's.
 from __future__ import annotations
 
 import asyncio
+from unittest import mock
 
 import pytest
 
@@ -453,3 +454,134 @@ class TestProbeSelfCheck:
         monkeypatch.setattr("pcwake.hub.bot.is_reachable", boom)
         bot = make_bot()
         await bot._check_probe_works()   # must not raise
+
+
+class TestWakeFlow:
+    """/wake is the flagship feature and its confirmation path had no tests.
+
+    The user sends /wake, sees "Waking...", and the watcher is what turns
+    that into either "Online" or an explanation. If it never resolves, the
+    message sits there forever and the feature looks broken even when the
+    PC woke perfectly.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_real_packets(self, monkeypatch):
+        self.sent = []
+        monkeypatch.setattr(
+            "pcwake.hub.bot.send_magic_packet",
+            lambda mac, broadcast="255.255.255.255", **kw: self.sent.append((mac, broadcast)),
+        )
+
+    async def test_wake_sends_the_packet_to_the_configured_address(self):
+        bot = make_bot(
+            hosts=(
+                HostConfig(name="desk", mac="aa:bb:cc:dd:ee:ff", broadcast="192.168.1.255"),
+            )
+        )
+        bot._state.get("desk").apply_presence(Presence.OFFLINE)
+        await bot._wake(bot._config.default_host, Recorder())
+        assert self.sent == [("aa:bb:cc:dd:ee:ff", "192.168.1.255")]
+        for task in list(bot._spawned):
+            task.cancel()
+
+    async def test_wake_refuses_when_the_host_is_already_online(self):
+        # Sending a packet to a running PC is harmless but the reply would be
+        # misleading, and it would start a pointless 90s watch.
+        bot = make_bot()
+        set_online(bot)
+        respond = Recorder()
+        await bot._wake(bot._config.default_host, respond)
+        assert self.sent == []
+        assert "already online" in respond.messages[0]
+
+    async def test_wake_puts_the_host_into_the_waking_state(self):
+        bot = make_bot()
+        bot._state.get("desk").apply_presence(Presence.OFFLINE)
+        await bot._wake(bot._config.default_host, Recorder())
+        assert bot._state.get("desk").resolve() is HostState.WAKING
+        for task in list(bot._spawned):
+            task.cancel()
+
+    async def test_a_failed_send_is_reported_and_starts_no_watch(self):
+        bot = make_bot()
+        bot._state.get("desk").apply_presence(Presence.OFFLINE)
+        with mock.patch(
+            "pcwake.hub.bot.send_magic_packet", side_effect=OSError("network down")
+        ):
+            respond = Recorder()
+            await bot._wake(bot._config.default_host, respond)
+        assert "network down" in respond.messages[0]
+        assert not bot._spawned
+
+    async def test_the_watcher_reports_the_host_coming_online(self, monkeypatch):
+        monkeypatch.setattr("pcwake.hub.bot.WAKE_TIMEOUT", 5.0)
+        bot = make_bot()
+        status = bot._state.get("desk")
+        status.apply_presence(Presence.OFFLINE)
+        message = Recorder()
+        await bot._wake(bot._config.default_host, message)
+
+        # The agent connects, exactly as the MQTT pump would report it.
+        status.apply_presence(Presence.ONLINE)
+        await bot._on_state_change("desk", HostState.OFFLINE, HostState.ONLINE)
+        await asyncio.wait_for(asyncio.gather(*bot._spawned), timeout=5)
+
+        assert any("Online" in m for m in message.messages), message.messages
+        assert status.wake_deadline is None, "the wake window should be cleared"
+
+    async def test_the_watcher_explains_a_wake_that_did_not_work(self, monkeypatch):
+        monkeypatch.setattr("pcwake.hub.bot.WAKE_TIMEOUT", 0.2)
+        bot = make_bot()
+        bot._state.get("desk").apply_presence(Presence.OFFLINE)
+        message = Recorder()
+        await bot._wake(bot._config.default_host, message)
+        await asyncio.wait_for(asyncio.gather(*bot._spawned), timeout=5)
+
+        final = message.messages[-1]
+        # It must name the two things that are actually wrong 90% of the time.
+        assert "did not come online" in final
+        assert "Fast Startup" in final
+
+    async def test_a_host_that_came_up_during_the_reply_is_not_missed(
+        self, monkeypatch
+    ):
+        """The race the pre-check closes.
+
+        Sending the "Waking..." reply is a round trip to Telegram. If the
+        host comes online during it, the state change fires before the
+        watcher registers, so the event it waits on is never set -- and a
+        successful wake would sit until the timeout and report as failed.
+        """
+        monkeypatch.setattr("pcwake.hub.bot.WAKE_TIMEOUT", 30.0)
+        bot = make_bot()
+        status = bot._state.get("desk")
+        status.apply_presence(Presence.OFFLINE)
+
+        class SlowTelegram(Recorder):
+            async def __call__(self, text, **kw):
+                self.messages.append(text)
+                # The host comes online mid-reply, with nobody registered yet.
+                status.apply_presence(Presence.ONLINE)
+                await bot._on_state_change("desk", HostState.OFFLINE, HostState.ONLINE)
+                return self
+
+        message = SlowTelegram()
+        await bot._wake(bot._config.default_host, message)
+        # Must finish promptly rather than waiting out the 30s timeout.
+        await asyncio.wait_for(asyncio.gather(*bot._spawned), timeout=5)
+        assert any("Online" in m for m in message.messages), message.messages
+
+    async def test_the_watcher_survives_a_message_it_cannot_edit(self, monkeypatch):
+        # edit_message_text returns True, not a Message, for inline messages.
+        monkeypatch.setattr("pcwake.hub.bot.WAKE_TIMEOUT", 0.2)
+        bot = make_bot()
+        bot._state.get("desk").apply_presence(Presence.OFFLINE)
+
+        class BoolReturning(Recorder):
+            async def __call__(self, text, **kw):
+                self.messages.append(text)
+                return True
+
+        await bot._wake(bot._config.default_host, BoolReturning())
+        await asyncio.wait_for(asyncio.gather(*bot._spawned), timeout=5)  # must not raise

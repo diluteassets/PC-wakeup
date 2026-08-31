@@ -221,17 +221,37 @@ def check_linux_wol() -> Check:
             f"could not query {interface} (ethtool usually needs root)",
             f"run `sudo ethtool {interface} | grep Wake-on`",
         )
-    match = re.search(r"Wake-on:\s*(\S+)", output)
-    if match is None:
+    setting = _parse_wake_on(output)
+    if setting is None:
         return Check("wake-on-lan", Result.WARN, f"{interface} reports no Wake-on setting")
-    if "g" not in match.group(1):
+    if "g" not in setting:
         return Check(
             "wake-on-lan",
             Result.FAIL,
-            f"{interface} has Wake-on: {match.group(1)}, so magic packets are ignored",
+            f"{interface} has Wake-on: {setting}, so magic packets are ignored",
             f"sudo ethtool -s {interface} wol g (and make it persistent, see SETUP.md)",
         )
-    return Check("wake-on-lan", Result.OK, f"{interface} has Wake-on: {match.group(1)}")
+    return Check("wake-on-lan", Result.OK, f"{interface} has Wake-on: {setting}")
+
+
+def _parse_wake_on(output: str) -> str | None:
+    """Pull the *current* Wake-on setting out of `ethtool <iface>` output.
+
+    ethtool prints two lines that both contain "Wake-on:":
+
+        Supports Wake-on: pumbg     <- what the hardware can do
+        Wake-on: d                  <- what it is actually set to
+
+    A substring search finds the first, whose value almost always contains
+    "g" -- so it reports that magic packets will work on a machine where they
+    are switched off. Matching whole lines is what keeps this honest.
+    """
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Wake-on:"):
+            value = stripped.split(":", 1)[1].strip()
+            return value or None
+    return None
 
 
 def run_checks(config: AgentConfig) -> list[Check]:

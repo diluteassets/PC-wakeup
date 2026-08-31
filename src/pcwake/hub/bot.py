@@ -574,8 +574,16 @@ class PcWakeBot:
         event = asyncio.Event()
         self._online_waiters[host.name].append(event)
         try:
-            await asyncio.wait_for(event.wait(), timeout=WAKE_TIMEOUT)
-            came_up = True
+            # The host may already have come online while the "Waking..."
+            # message was being sent -- that reply is a network round trip to
+            # Telegram, and the state change fires with nobody registered.
+            # Checking here closes that window; without it a wake that
+            # succeeded would sit until the timeout and report as failed.
+            if status.resolve() is HostState.ONLINE:
+                came_up = True
+            else:
+                await asyncio.wait_for(event.wait(), timeout=WAKE_TIMEOUT)
+                came_up = True
         except asyncio.TimeoutError:
             came_up = False
         finally:
