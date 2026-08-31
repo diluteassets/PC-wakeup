@@ -35,11 +35,11 @@ class WindowsBackend(PowerBackend):
         """
         try:
             powrprof = ctypes.windll.powrprof
-        except (AttributeError, OSError) as exc:  # pragma: no cover - Windows only
+        except (AttributeError, OSError) as exc:
             raise PowerActionError(f"cannot load powrprof.dll: {exc}") from exc
         # Returns zero on failure, and unlike most Win32 calls does not set a
         # useful last error, so there is nothing more specific to report.
-        if powrprof.SetSuspendState(0, 1, 0) == 0:  # pragma: no cover - Windows only
+        if powrprof.SetSuspendState(0, 1, 0) == 0:
             raise PowerActionError(
                 "SetSuspendState failed; check that sleep is available "
                 "(`powercfg /a`)"
@@ -59,9 +59,9 @@ class WindowsBackend(PowerBackend):
         """
         try:
             user32 = ctypes.windll.user32
-        except (AttributeError, OSError) as exc:  # pragma: no cover - Windows only
+        except (AttributeError, OSError) as exc:
             raise PowerActionError(f"cannot load user32.dll: {exc}") from exc
-        if user32.LockWorkStation() == 0:  # pragma: no cover - Windows only
+        if user32.LockWorkStation() == 0:
             error = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
             raise PowerActionError(
                 f"LockWorkStation failed (error {error}); the agent may not be "
