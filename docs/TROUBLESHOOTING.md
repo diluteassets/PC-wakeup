@@ -251,6 +251,26 @@ silent to unknown chats on purpose — it does not confirm it exists.
 
 ---
 
+## The status flaps between online and offline
+
+Two PCs configured with the same `[agent].host` name. They share an MQTT
+client id, and the broker is required to disconnect the existing client
+whenever another connects with the same one — so the two agents kick each
+other off in a loop, forever. Commands land on whichever happens to be
+connected at that instant.
+
+The agent notices and says so:
+
+```
+connected 4 times in under 60s. This is usually two agents configured
+with the same [agent].host ('desk') ...
+```
+
+Give each PC its own name, and change it in all three places: that PC's
+`[agent].host`, the hub's `[[hosts]]` entry, and `/etc/mosquitto/aclfile`.
+
+---
+
 ## The status is right but stale
 
 Offline detection depends on the MQTT keepalive: the broker declares a client

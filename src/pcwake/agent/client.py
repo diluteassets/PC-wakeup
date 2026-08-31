@@ -10,6 +10,7 @@ there before changing it.
 
 from __future__ import annotations
 
+import collections
 import logging
 import platform
 import threading
@@ -49,6 +50,16 @@ the rest of the path out."""
 RECONNECT_MIN = 1
 RECONNECT_MAX = 30
 
+FLAP_COUNT = 4
+FLAP_WINDOW = 60.0
+"""Connecting this many times inside this many seconds is not a flaky
+network -- it is almost always two agents sharing one [agent].host name.
+They share an MQTT client id, and the broker is required to disconnect the
+existing client whenever the second one connects, so the two kick each other
+round in a loop forever. The symptom is a status that flaps and commands
+that land on whichever agent happens to be connected, which is baffling
+unless something names the cause."""
+
 
 class Agent:
     """Connects to the broker, announces presence, and performs commands."""
@@ -66,6 +77,10 @@ class Agent:
         # Commands are serialised: two power actions racing each other is
         # never what anyone wanted.
         self._lock = threading.Lock()
+        # Timestamps of recent successful connects, used to notice the
+        # reconnect loop that a duplicate host name produces.
+        self._connects: collections.deque[float] = collections.deque(maxlen=FLAP_COUNT)
+        self._warned_about_flapping = False
         self._client = self._build_client()
 
     @property
@@ -144,9 +159,30 @@ class Agent:
 
         host = self._config.host
         log.info("connected to the broker as %s", host)
+        self._note_connection()
         client.subscribe(cmd_topic(host), qos=QOS)
         client.publish(status_topic(host), Presence.ONLINE.value, qos=QOS, retain=True)
         client.publish(info_topic(host), self._agent_info().encode(), qos=QOS, retain=True)
+
+    def _note_connection(self) -> None:
+        """Warn if we are reconnecting far too often to be a network problem."""
+        now = time.monotonic()
+        self._connects.append(now)
+        if self._warned_about_flapping or len(self._connects) < FLAP_COUNT:
+            return
+        if now - self._connects[0] > FLAP_WINDOW:
+            return
+        self._warned_about_flapping = True
+        log.warning(
+            "connected %d times in under %.0fs. This is usually two agents "
+            "configured with the same [agent].host (%r): they share an MQTT "
+            "client id and the broker disconnects one whenever the other "
+            "connects. Give each PC its own name, in its config and in the "
+            "hub's [[hosts]] and the mosquitto ACL.",
+            FLAP_COUNT,
+            FLAP_WINDOW,
+            self._config.host,
+        )
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
         if reason_code == 0:
