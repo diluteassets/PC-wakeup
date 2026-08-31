@@ -1,0 +1,30 @@
+// polkit rule letting the pcwake agent suspend and power off the machine.
+//
+//   sudo cp install/linux/99-pcwake-power.rules /etc/polkit-1/rules.d/
+//
+// On a desktop with an active graphical seat, logind already authorises
+// these for the logged-in user and this file is unnecessary. It is for the
+// headless case -- a machine with no active session -- where the agent would
+// otherwise be told "Interactive authentication required" on every command.
+//
+// The action list is deliberately exhaustive rather than a prefix match: the
+// agent should be able to suspend and power off this machine, and nothing
+// else.
+
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "pcwake") {
+        return undefined;
+    }
+    var allowed = [
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.suspend-multiple-sessions"
+    ];
+    if (allowed.indexOf(action.id) !== -1) {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

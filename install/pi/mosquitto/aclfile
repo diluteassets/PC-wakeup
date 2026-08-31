@@ -1,0 +1,22 @@
+# Topic permissions for pcwake.
+#
+# The point of this file: a compromised agent should be able to talk about
+# itself and nothing more. It cannot send commands, and it cannot read or
+# forge another machine's status.
+
+# The hub drives everything: it reads status, info and acks from every host,
+# and it is the only client allowed to publish commands.
+user hub
+topic read pcwake/+/status
+topic read pcwake/+/info
+topic read pcwake/+/ack
+topic write pcwake/+/cmd
+
+# Each agent owns exactly one host's topics. Duplicate this block per PC,
+# with one mosquitto_passwd user per agent, and replace "desk" with that
+# host's name.
+user agent
+topic write pcwake/desk/status
+topic write pcwake/desk/info
+topic write pcwake/desk/ack
+topic read pcwake/desk/cmd

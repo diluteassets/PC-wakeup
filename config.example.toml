@@ -1,0 +1,78 @@
+# pcwake configuration.
+#
+# The same file shape serves both roles; each reads only the sections it
+# needs. Copy it to config.toml next to the service, or to /etc/pcwake/
+# config.toml, and `chmod 600` it -- it holds the bot token and the broker
+# password.
+#
+# Both secrets can come from the environment instead, which is what the
+# shipped systemd units do:
+#     PCWAKE_TELEGRAM_TOKEN, PCWAKE_BROKER_PASSWORD
+
+
+# ---------------------------------------------------------------- both roles
+
+[broker]
+# On the Pi this is the loopback address, because the broker is local.
+# On the PC it is the Pi's address -- give the Pi a static DHCP lease so
+# this does not move.
+host = "127.0.0.1"
+port = 1883
+username = "hub"       # use "agent" in the PC's copy of this file
+password = "changeme"  # or leave unset and use PCWAKE_BROKER_PASSWORD
+
+
+# ------------------------------------------------------------ the PC (agent)
+
+[agent]
+# Names this PC's MQTT topics. Defaults to the machine's short hostname.
+# It must match the `name` of the matching [[hosts]] entry on the Pi.
+host = "desk"
+
+# Log power commands instead of performing them. Leave this on for the first
+# run: it exercises the entire path -- broker, protocol, correlation, acking
+# -- without suspending anything.
+dry_run = true
+
+# Windows only: pass /f to shutdown.exe, closing applications without asking.
+# Off by default, because a shutdown that did not happen is a smaller problem
+# than an unsaved document that did not survive.
+force_shutdown = false
+
+
+# ------------------------------------------------------------- the Pi (hub)
+
+[telegram]
+# From @BotFather. Prefer PCWAKE_TELEGRAM_TOKEN over writing it here.
+token = ""
+
+# The only authorization there is. Anyone whose chat id is listed can power
+# off your PC; anyone else is ignored. To find yours, start the hub with this
+# list set to a placeholder, message the bot, and read the id out of the log:
+#     journalctl -u pcwake-hub -f
+allowed_chat_ids = [123456789]
+
+# One block per PC. With exactly one, the bot commands take no argument.
+[[hosts]]
+# Must match [agent].host in that PC's config.
+name = "desk"
+
+# The PC's wired MAC address. This is what the magic packet targets, and it
+# is the one identifier that does not change with DHCP.
+mac = "aa:bb:cc:dd:ee:ff"
+
+# Optional but recommended: lets the hub tell "powered off" apart from
+# "powered on with a dead agent". Give the PC a static DHCP lease so this
+# stays correct.
+ip = "192.168.1.50"
+
+# Where to broadcast the magic packet. The default global broadcast address
+# is not forwarded by routers, so a PC on a different subnet needs that
+# subnet's directed broadcast address here (for example "192.168.1.255"),
+# and a router configured to forward it.
+broadcast = "255.255.255.255"
+
+# Optional. Surfaced by /remote. Remote desktop is deliberately not built
+# into this bot -- these just hand off to a tool that does it properly.
+# rustdesk_id = "123456789"
+# moonlight_host = "192.168.1.50"

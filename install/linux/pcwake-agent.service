@@ -1,0 +1,38 @@
+# The Linux agent, as a system service.
+#
+#   sudo cp install/linux/pcwake-agent.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pcwake-agent
+#
+# Runs as a dedicated user rather than root: the polkit rule in this
+# directory is what grants that user suspend and poweroff, so the agent never
+# holds more privilege than the four actions need.
+#
+# Note that /lock needs a graphical session to lock. A system service has
+# none, so if you want /lock on a desktop, run the agent as a user service
+# instead (`systemctl --user`) with the same ExecStart, and drop the User=
+# and Group= lines.
+
+[Unit]
+Description=pcwake agent (reports presence, performs power commands)
+Documentation=https://github.com/diluteassets/pc-wakeup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pcwake
+Group=pcwake
+ExecStart=/opt/pcwake/venv/bin/pcwake-agent --config /etc/pcwake/config.toml
+Restart=always
+RestartSec=5
+EnvironmentFile=-/etc/pcwake/pcwake.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/pcwake
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+# Re-arms Wake-on-LAN on every boot.
+#
+# `ethtool -s <iface> wol g` does not survive a reboot. If you use
+# NetworkManager, prefer its own setting instead of this unit:
+#
+#   nmcli connection modify "<connection>" 802-3-ethernet.wake-on-lan magic
+#
+# Otherwise install this, editing the interface name to match:
+#   sudo cp install/linux/pcwake-wol.service /etc/systemd/system/
+#   sudo systemctl enable --now pcwake-wol
+
+[Unit]
+Description=Enable Wake-on-LAN on the wired interface
+After=network.target
+
+[Service]
+Type=oneshot
+# Replace eth0 with your interface (`ip route get 1.1.1.1` names it).
+ExecStart=/usr/sbin/ethtool -s eth0 wol g
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

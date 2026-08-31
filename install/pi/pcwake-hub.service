@@ -1,0 +1,42 @@
+# Install to /etc/systemd/system/pcwake-hub.service
+#
+#   sudo cp install/pi/pcwake-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pcwake-hub
+
+[Unit]
+Description=pcwake hub (Telegram bot and MQTT client)
+Documentation=https://github.com/diluteassets/pc-wakeup
+# Wants= rather than Requires=: if the broker is briefly down the hub
+# reconnects on its own, and taking the bot down with it would leave no way
+# to find out what is wrong.
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pcwake
+Group=pcwake
+ExecStart=/opt/pcwake/venv/bin/pcwake-hub --config /etc/pcwake/config.toml
+Restart=always
+RestartSec=5
+
+# Keeps the secrets out of the config file and out of `ps`. Create it with
+# mode 600, owned by root:
+#   PCWAKE_TELEGRAM_TOKEN=123456:ABC...
+#   PCWAKE_BROKER_PASSWORD=...
+EnvironmentFile=-/etc/pcwake/pcwake.env
+
+# The hub needs the network and its config, and nothing else on the system.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/pcwake
+# ping needs to create an ICMP socket; this is the capability that allows it
+# without making the binary or the service privileged.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
