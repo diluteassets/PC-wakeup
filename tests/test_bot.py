@@ -7,6 +7,8 @@ worth pinning is ours, not python-telegram-bot's.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from pcwake.common.config import BrokerConfig, HostConfig, HubConfig
@@ -25,11 +27,8 @@ class FakeMqtt:
         self.published: list[tuple[str, Action]] = []
         self.connected = True
 
-    async def publish_command(self, host_name: str, action: Action):
-        from pcwake.common.protocol import Command
-
-        self.published.append((host_name, action))
-        return Command(action=action)
+    async def publish_command(self, host_name: str, command):
+        self.published.append((host_name, command.action))
 
 
 class Recorder:
@@ -288,3 +287,169 @@ class TestStatusRendering:
         # text is HTML and unescaped markup would break the message.
         bot = make_bot(hosts=(HostConfig(name="a-b_c.d", mac="aa:bb:cc:dd:ee:ff"),))
         assert "a-b_c.d" in bot._status_text(bot._config.default_host)
+
+
+class TestAckWaiterOrdering:
+    """A command must have its ack waiter registered *before* it is
+    published. Publishing first leaves a window -- the publish awaits the
+    broker's PUBACK, freeing the event loop -- in which a fast ack arrives,
+    finds no waiter, and is dropped. The user is then told the command timed
+    out even though the PC performed it.
+    """
+
+    async def test_the_waiter_exists_before_the_command_is_published(self, fast_ack):
+        bot = make_bot()
+        set_online(bot)
+        pending_at_publish: list[int] = []
+
+        real_publish = bot._mqtt.publish_command
+
+        async def spy(*args, **kwargs):
+            # However the command is addressed, by the time it goes out
+            # somebody must already be waiting for its answer.
+            pending_at_publish.append(len(bot._state.pending))
+            return await real_publish(*args, **kwargs)
+
+        bot._mqtt.publish_command = spy
+        await bot._run_command(bot._config.default_host, Action.SLEEP, Recorder())
+
+        assert pending_at_publish == [1], (
+            "the command was published with no ack waiter registered; an ack "
+            "arriving before the waiter is created would be dropped and "
+            "reported to the user as a timeout"
+        )
+
+    async def test_a_failed_publish_leaves_no_stale_waiter(self):
+        # Registering first means the failure path has to clean up after
+        # itself, or every failed send leaks a waiter.
+        bot = make_bot()
+        set_online(bot)
+
+        async def boom(*args, **kwargs):
+            import aiomqtt
+
+            raise aiomqtt.MqttError("broker went away")
+
+        bot._mqtt.publish_command = boom
+        respond = Recorder()
+        await bot._run_command(bot._config.default_host, Action.SLEEP, respond)
+
+        assert len(bot._state.pending) == 0
+        assert "Broker unreachable" in respond.messages[0]
+
+
+class TestBackgroundTaskRetention:
+    """The event loop keeps only weak references to tasks, so a task nobody
+    holds can be garbage collected before it finishes. For the wake watcher
+    that means the user sees 'Waking...' forever even though the PC came up.
+    """
+
+    async def test_the_wake_watcher_is_held_for_its_lifetime(self, monkeypatch):
+        bot = make_bot()
+        bot._state.get("desk").apply_presence(Presence.OFFLINE)
+        monkeypatch.setattr("pcwake.hub.bot.send_magic_packet", lambda *a, **k: None)
+
+        await bot._wake(bot._config.default_host, Recorder())
+
+        assert bot._spawned, (
+            "the wake watcher was spawned with no reference kept; asyncio may "
+            "collect it mid-wait and the wake would never be reported"
+        )
+        for task in list(bot._spawned):
+            task.cancel()
+
+    async def test_a_finished_task_is_released(self):
+        # The set must not grow without bound over a long uptime.
+        bot = make_bot()
+
+        async def noop():
+            return None
+
+        task = bot._spawn(noop())
+        assert task in bot._spawned
+        await task
+        await asyncio.sleep(0)
+        assert task not in bot._spawned
+
+
+class TestProbeLoopSurvival:
+    """Reachability is half of the status model. A probe loop that dies takes
+    the agent-down state with it, silently, and leaves the last value stuck --
+    so a powered-off PC would read as 'agent not running' indefinitely."""
+
+    async def test_the_loop_survives_a_failing_probe(self, monkeypatch):
+        calls = []
+
+        async def exploding_probe(host):
+            calls.append(host.name)
+            raise ProcessLookupError("ping vanished between timeout and kill")
+
+        monkeypatch.setattr("pcwake.hub.bot.PROBE_INTERVAL", 0.01)
+        bot = make_bot()
+        monkeypatch.setattr(bot, "_probe", exploding_probe)
+
+        task = asyncio.create_task(bot._probe_loop())
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+        assert not task.done() or task.cancelled()
+        assert len(calls) > 1, (
+            f"the probe loop stopped after {len(calls)} failure(s); it must "
+            "keep going or reachability freezes for the process lifetime"
+        )
+
+    async def test_a_cancel_still_stops_the_loop(self, monkeypatch):
+        # The broad except must not swallow cancellation, or shutdown hangs.
+        monkeypatch.setattr("pcwake.hub.bot.PROBE_INTERVAL", 0.01)
+        bot = make_bot()
+        task = asyncio.create_task(bot._probe_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+class TestProbeSelfCheck:
+    """A broken probe loses the agent-down state silently. The startup check
+    turns that into a log line naming the usual cause."""
+
+    async def test_warns_when_the_probe_cannot_run(self, monkeypatch, caplog):
+        async def no_ping(ip, timeout=None):
+            return None
+
+        monkeypatch.setattr("pcwake.hub.bot.is_reachable", no_ping)
+        bot = make_bot()
+        with caplog.at_level("WARNING"):
+            await bot._check_probe_works()
+        assert "CAP_NET_RAW" in caplog.text
+
+    async def test_silent_when_the_probe_works(self, monkeypatch, caplog):
+        async def works(ip, timeout=None):
+            return True
+
+        monkeypatch.setattr("pcwake.hub.bot.is_reachable", works)
+        bot = make_bot()
+        with caplog.at_level("WARNING"):
+            await bot._check_probe_works()
+        assert "CAP_NET_RAW" not in caplog.text
+
+    async def test_skipped_when_no_host_has_an_ip(self, monkeypatch, caplog):
+        # Nothing to probe by configuration, so the warning would be noise.
+        called = []
+
+        async def spy(ip, timeout=None):
+            called.append(ip)
+            return None
+
+        monkeypatch.setattr("pcwake.hub.bot.is_reachable", spy)
+        bot = make_bot(hosts=(HostConfig(name="desk", mac="aa:bb:cc:dd:ee:ff"),))
+        await bot._check_probe_works()
+        assert called == []
+
+    async def test_a_raising_probe_does_not_stop_startup(self, monkeypatch):
+        async def boom(ip, timeout=None):
+            raise OSError("no network namespace")
+
+        monkeypatch.setattr("pcwake.hub.bot.is_reachable", boom)
+        bot = make_bot()
+        await bot._check_probe_works()   # must not raise

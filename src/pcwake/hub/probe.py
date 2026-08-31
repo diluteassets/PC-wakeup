@@ -11,6 +11,7 @@ raw ICMP needs root or CAP_NET_RAW and the hub has no business holding either.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 
@@ -53,9 +54,14 @@ async def is_reachable(ip: str, timeout: float = PING_TIMEOUT) -> bool | None:
         returncode = await asyncio.wait_for(process.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         # Overran even the ping's own deadline; treat as unreachable, but do
-        # not leave the process behind.
-        process.kill()
-        await process.wait()
+        # not leave the process behind. If it exited in the moment between the
+        # timeout firing and the kill, kill() raises ProcessLookupError --
+        # which must not escape, or it would end the caller's probe loop and
+        # freeze reachability for good.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(ProcessLookupError):
+            await process.wait()
         log.debug("ping to %s timed out after %.1fs", ip, timeout)
         return False
 

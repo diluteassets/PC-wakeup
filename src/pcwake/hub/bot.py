@@ -28,7 +28,7 @@ from telegram.ext import (
 )
 
 from ..common.config import HostConfig, HubConfig
-from ..common.protocol import ACK_TIMEOUT, WAKE_TIMEOUT, Action
+from ..common.protocol import ACK_TIMEOUT, WAKE_TIMEOUT, Action, Command
 from .mqtt import HubMqtt
 from .probe import is_reachable
 from .state import HostState, HubState
@@ -69,6 +69,17 @@ class PcWakeBot:
             h.name: [] for h in config.hosts
         }
         self._background: list[asyncio.Task] = []
+        # The event loop keeps only weak references to tasks, so a task
+        # nobody else holds can be garbage collected before it finishes.
+        # Anything spawned to outlive its handler goes in here.
+        self._spawned: set[asyncio.Task] = set()
+
+    def _spawn(self, coro, name: str | None = None) -> asyncio.Task:
+        """Start a background task and keep it alive until it finishes."""
+        task = asyncio.create_task(coro, name=name)
+        self._spawned.add(task)
+        task.add_done_callback(self._spawned.discard)
+        return task
 
     # ---------------------------------------------------------------- wiring
 
@@ -108,6 +119,7 @@ class PcWakeBot:
         return app
 
     async def _start_background(self, app: Application) -> None:
+        await self._check_probe_works()
         self._background = [
             asyncio.create_task(self._mqtt.run(), name="pcwake-mqtt"),
             asyncio.create_task(self._probe_loop(), name="pcwake-probe"),
@@ -119,9 +131,9 @@ class PcWakeBot:
         )
 
     async def _stop_background(self, app: Application) -> None:
-        for task in self._background:
+        for task in [*self._background, *self._spawned]:
             task.cancel()
-        for task in self._background:
+        for task in [*self._background, *self._spawned]:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._background = []
@@ -143,6 +155,36 @@ class PcWakeBot:
 
     # ------------------------------------------------------------ background
 
+    async def _check_probe_works(self) -> None:
+        """Ping ourselves once at startup, and say so loudly if it fails.
+
+        Without a working probe the hub silently loses the "powered on, agent
+        not running" state -- it just never appears, which looks like nothing
+        is wrong. Sandboxing is the usual cause: ping carries a file
+        capability, and those are disabled under NoNewPrivileges, so the
+        service needs AmbientCapabilities=CAP_NET_RAW (the shipped unit sets
+        it). Better to name that here than leave someone wondering why a
+        crashed agent always reads as a powered-off PC.
+        """
+        if not any(host.ip for host in self._config.hosts):
+            return
+        try:
+            result = await is_reachable("127.0.0.1")
+        except Exception:  # noqa: BLE001 - a broken self-check must not stop startup
+            log.exception("reachability self-check raised")
+            result = None
+        if result is not True:
+            log.warning(
+                "reachability probe is not working (ping to 127.0.0.1 returned "
+                "%r). Status will still report online and offline, but never "
+                "'powered on, agent not running'. If the hub runs under "
+                "systemd, check AmbientCapabilities=CAP_NET_RAW is set on the "
+                "unit.",
+                result,
+            )
+        else:
+            log.info("reachability probe working")
+
     async def _on_state_change(
         self, host_name: str, before: HostState, after: HostState
     ) -> None:
@@ -151,9 +193,21 @@ class PcWakeBot:
                 event.set()
 
     async def _probe_loop(self) -> None:
+        """Keep every host's reachability fresh, and never stop doing it.
+
+        An unguarded loop that dies takes the whole agent-down state with it,
+        silently and for the lifetime of the process -- and worse than losing
+        the feature, the last reachability value sticks, so a stale True would
+        report a powered-off PC as "agent not running" indefinitely.
+        """
         while True:
             for host in self._config.hosts:
-                await self._probe(host)
+                try:
+                    await self._probe(host)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - the loop must outlive any single probe
+                    log.exception("probe for %s failed", host.name)
             await asyncio.sleep(PROBE_INTERVAL)
 
     async def _probe(self, host: HostConfig) -> None:
@@ -432,14 +486,31 @@ class PcWakeBot:
             )
             return
 
+        # Register the waiter before the command can possibly be answered.
+        # Publishing awaits the broker's PUBACK, which frees the event loop
+        # long enough for a fast agent to ack; an ack with no waiter is
+        # dropped, and the user would be told a command timed out that the PC
+        # actually performed.
+        command = Command(action=action)
         try:
-            command = await self._mqtt.publish_command(host.name, action)
+            future = self._state.pending.register(command.id)
+        except RuntimeError:
+            # A colliding in-flight id. Vanishingly unlikely, but the user
+            # must never be left with no reply at all.
+            await respond(
+                "That command is already in flight; try again in a moment.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        try:
+            await self._mqtt.publish_command(host.name, command)
         except aiomqtt.MqttError as exc:
+            self._state.pending.discard(command.id)
             await respond(f"Broker unreachable, command not sent: {_esc(exc)}",
                           parse_mode=ParseMode.HTML)
             return
 
-        future = self._state.pending.register(command.id)
         try:
             ack = await asyncio.wait_for(future, timeout=ACK_TIMEOUT)
         except asyncio.TimeoutError:
@@ -491,8 +562,10 @@ class PcWakeBot:
             parse_mode=ParseMode.HTML,
         )
         # Watch in the background so the handler returns immediately and the
-        # bot stays responsive during the boot.
-        asyncio.create_task(self._watch_wake(host, message))
+        # bot stays responsive during the boot. Spawned through _spawn so the
+        # watcher cannot be collected mid-wait, which would leave the user
+        # looking at "Waking..." forever even though the PC came up.
+        self._spawn(self._watch_wake(host, message), name=f"pcwake-wake-{host.name}")
 
     async def _watch_wake(self, host: HostConfig, message) -> None:
         """Wait for the woken host to appear, then say so in the same message."""
@@ -521,6 +594,12 @@ class PcWakeBot:
                 "did not, check BIOS Wake-on-LAN and (on Windows) that Fast "
                 "Startup is off.</i>"
             )
+        # edit_message_text returns True rather than a Message when the
+        # original was an inline message. We never send those, but a watcher
+        # that raised here would swallow the wake result silently.
+        if not hasattr(message, "edit_text"):
+            log.info("%s finished waking; no editable message to update", host.name)
+            return
         with contextlib.suppress(TelegramError):
             await message.edit_text(
                 text, parse_mode=ParseMode.HTML, reply_markup=self._keyboard(host)

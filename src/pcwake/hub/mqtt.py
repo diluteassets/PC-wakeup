@@ -23,7 +23,6 @@ from ..common.protocol import (
     QOS,
     STATUS_WILDCARD,
     Ack,
-    Action,
     AgentInfo,
     Command,
     ProtocolError,
@@ -140,16 +139,23 @@ class HubMqtt:
         elif leaf == "info":
             host.info = AgentInfo.decode(payload)
 
-    async def publish_command(self, host_name: str, action: Action) -> Command:
-        """Publish a power command. The caller awaits the ack separately."""
+    async def publish_command(self, host_name: str, command: Command) -> None:
+        """Publish an already-built command.
+
+        The caller builds the Command and registers its ack waiter *before*
+        calling this, which is the whole reason the command is a parameter
+        rather than something constructed here. Publishing awaits the
+        broker's PUBACK, and that await frees the event loop -- long enough
+        for the agent to answer. An ack that arrives before its waiter exists
+        is dropped, and the user is told a command timed out that in fact
+        succeeded.
+        """
         if self._client is None or not self._connected.is_set():
             raise aiomqtt.MqttError("not connected to the broker")
-        command = Command(action=action)
         await self._client.publish(
             cmd_topic(host_name), payload=command.encode(), qos=QOS
         )
-        log.info("sent %s to %s (id=%s)", action.value, host_name, command.id)
-        return command
+        log.info("sent %s to %s (id=%s)", command.action.value, host_name, command.id)
 
     async def wait_connected(self, timeout: float = 5.0) -> bool:
         with contextlib.suppress(asyncio.TimeoutError):

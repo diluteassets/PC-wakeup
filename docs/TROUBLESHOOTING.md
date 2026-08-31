@@ -90,6 +90,28 @@ see below.
 
 ---
 
+## `/status` never says 🟡 Powered on, agent not running
+
+That state needs the reachability probe, and the probe needs two things: an
+`ip` set for the host in the hub config, and a working `ping`.
+
+The hub pings itself once at startup and logs a warning if it cannot:
+
+```bash
+journalctl -u pcwake-hub | grep -i "reachability probe"
+```
+
+If it warns, the usual cause is sandboxing. `ping` carries a file capability
+(`cap_net_raw=ep`), and file capabilities are disabled under
+`NoNewPrivileges=true` — so the service needs `AmbientCapabilities=CAP_NET_RAW`,
+which the shipped unit sets. If you wrote your own unit, add it.
+
+Everything else still works without the probe: online and offline are
+reported from MQTT presence alone. You only lose the ability to tell a
+crashed agent apart from a powered-off PC.
+
+---
+
 ## `/status` says ⚪ Unknown
 
 No retained status on the broker and no `ip` configured to probe, so there is

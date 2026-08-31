@@ -24,6 +24,18 @@ from .conftest import wait_until
 HOST = "testpc"
 
 
+async def send(hub, action: Action):
+    """Send a command the way the bot does: register the ack waiter first,
+    then publish. Registering afterwards leaves a window in which the ack is
+    dropped -- see TestAckWaiterOrdering in test_bot.py."""
+    from pcwake.common.protocol import Command
+
+    command = Command(action=action)
+    future = hub.state.pending.register(command.id)
+    await hub.mqtt.publish_command(HOST, command)
+    return future
+
+
 class BlockingBackend(FakeBackend):
     """Holds an action open so the test can inspect what the hub knows
     *while* the action is still in progress. That is the only way to pin an
@@ -150,18 +162,15 @@ class TestPresence:
 class TestCommandRoundTrip:
     async def test_lock_is_performed_and_acked(self, hub, agent):
         assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
-        command = await hub.mqtt.publish_command(HOST, Action.LOCK)
-        future = hub.state.pending.register(command.id)
+        future = await send(hub, Action.LOCK)
         ack = await asyncio.wait_for(future, timeout=10)
         assert ack.ok is True
-        assert ack.id == command.id
         assert agent.backend.calls == [Action.LOCK]
 
     @pytest.mark.parametrize("action", list(Action))
     async def test_every_action_round_trips(self, hub, agent, action):
         assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
-        command = await hub.mqtt.publish_command(HOST, action)
-        future = hub.state.pending.register(command.id)
+        future = await send(hub, action)
         ack = await asyncio.wait_for(future, timeout=10)
         assert ack.ok is True and ack.action is action
         assert await wait_until(lambda: agent.backend.calls == [action])
@@ -177,8 +186,7 @@ class TestCommandRoundTrip:
         running.start()
         try:
             assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
-            command = await hub.mqtt.publish_command(HOST, Action.LOCK)
-            future = hub.state.pending.register(command.id)
+            future = await send(hub, Action.LOCK)
             ack = await asyncio.wait_for(future, timeout=10)
             assert ack.ok is False
             assert "no session" in ack.error
@@ -192,8 +200,7 @@ class TestCommandRoundTrip:
         await hub.mqtt._client.publish(cmd_topic(HOST), b"{not json", qos=QOS)
         await asyncio.sleep(0.5)
         # Still alive and still doing its job.
-        command = await hub.mqtt.publish_command(HOST, Action.LOCK)
-        future = hub.state.pending.register(command.id)
+        future = await send(hub, Action.LOCK)
         assert (await asyncio.wait_for(future, timeout=10)).ok is True
 
 
@@ -209,8 +216,7 @@ class TestAckOrdering:
         running.start()
         try:
             assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
-            command = await hub.mqtt.publish_command(HOST, Action.SHUTDOWN)
-            future = hub.state.pending.register(command.id)
+            future = await send(hub, Action.SHUTDOWN)
             ack = await asyncio.wait_for(future, timeout=10)
 
             # The ack is in hand and the machine has not begun going down.
@@ -236,8 +242,7 @@ class TestAckOrdering:
         running.start()
         try:
             assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
-            command = await hub.mqtt.publish_command(HOST, action)
-            future = hub.state.pending.register(command.id)
+            future = await send(hub, action)
             await asyncio.wait_for(future, timeout=10)
             assert not backend.started.is_set()
         finally:
@@ -252,8 +257,7 @@ class TestAckOrdering:
         running.start()
         try:
             assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
-            command = await hub.mqtt.publish_command(HOST, Action.LOCK)
-            future = hub.state.pending.register(command.id)
+            future = await send(hub, Action.LOCK)
 
             assert await wait_until(backend.started.is_set)
             # The action is in progress and no ack has been sent yet.
@@ -271,8 +275,11 @@ class TestTimeouts:
     async def test_a_command_to_a_dead_agent_times_out_rather_than_hanging(self, hub):
         # No agent is running. The hub must produce a visible timeout, which
         # is what the bot turns into "heard nothing back".
-        command = await hub.mqtt.publish_command(HOST, Action.LOCK)
+        from pcwake.common.protocol import Command
+
+        command = Command(action=Action.LOCK)
         future = hub.state.pending.register(command.id)
+        await hub.mqtt.publish_command(HOST, command)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(future, timeout=1.0)
         hub.state.pending.discard(command.id)
