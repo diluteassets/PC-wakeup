@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcwake"
+version = "1.0.0"
+description = "Wake, monitor, and power-control a PC from your phone via a Raspberry Pi, MQTT, and Telegram"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# No unconditional runtime dependencies: install the extra for the role you
+# are deploying. The Pi never needs the Windows-side code and vice versa.
+dependencies = []
+
+[project.optional-dependencies]
+agent = ["paho-mqtt>=2.0"]
+hub = ["aiomqtt>=2.0", "python-telegram-bot>=21.0"]
+dev = [
+    "pcwake[agent,hub]",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+pcwake-agent = "pcwake.agent.__main__:main"
+pcwake-hub = "pcwake.hub.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:pcwake.*"]
