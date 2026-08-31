@@ -102,10 +102,21 @@ Install the config and the topic ACL:
 ```bash
 sudo cp install/pi/mosquitto/pcwake.conf /etc/mosquitto/conf.d/
 sudo cp install/pi/mosquitto/aclfile /etc/mosquitto/
-sudo chown mosquitto: /etc/mosquitto/pcwake.passwd /etc/mosquitto/aclfile
-sudo chmod 600 /etc/mosquitto/pcwake.passwd
+sudo chown root:root /etc/mosquitto/pcwake.passwd /etc/mosquitto/aclfile
+sudo chmod 0700 /etc/mosquitto/pcwake.passwd /etc/mosquitto/aclfile
 sudo systemctl restart mosquitto
 ```
+
+Both files must be owned by **root** with mode **0700**. Mosquitto reads them
+while it is still root and only then drops privileges, so it does not need
+to own them — and it checks: anything looser logs
+
+```
+Warning: File /etc/mosquitto/aclfile has world readable permissions.
+         Future versions will refuse to load this file.
+```
+
+which is a warning today and a broker that will not start later.
 
 The ACL ships with one host named `desk`. If your PC has a different name,
 edit `/etc/mosquitto/aclfile` to match before going further — a mismatch here

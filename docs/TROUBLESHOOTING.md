@@ -121,6 +121,28 @@ least tell whether the machine is up.
 
 ---
 
+## Mosquitto warns about the password or ACL file
+
+```
+Warning: File /etc/mosquitto/aclfile has world readable permissions.
+         Future versions will refuse to load this file.
+Warning: File /etc/mosquitto/pcwake.passwd owner is not root.
+```
+
+Both files must be owned by root with mode 0700:
+
+```bash
+sudo chown root:root /etc/mosquitto/pcwake.passwd /etc/mosquitto/aclfile
+sudo chmod 0700 /etc/mosquitto/pcwake.passwd /etc/mosquitto/aclfile
+sudo systemctl restart mosquitto
+```
+
+Mosquitto reads them while it is still root and only then drops privileges,
+so it does not need to own them. This is a warning today and a broker that
+will not start on a future release.
+
+---
+
 ## The agent never connects
 
 **Credentials.** The most common cause, and `doctor` proves it in one step:
