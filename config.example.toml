@@ -21,6 +21,12 @@ port = 1883
 username = "hub"       # use "agent" in the PC's copy of this file
 password = "changeme"  # or leave unset and use PCWAKE_BROKER_PASSWORD
 
+# Seconds between keepalives. The broker declares a client dead at about
+# 1.5x this, so it sets how quickly an abruptly powered-off PC shows as
+# offline -- roughly 45s at the default of 30. Lower it for a faster
+# reaction at the cost of more chatter on an idle link.
+# keepalive = 30
+
 
 # ------------------------------------------------------------ the PC (agent)
 
@@ -33,6 +39,13 @@ host = "desk"
 # run: it exercises the entire path -- broker, protocol, correlation, acking
 # -- without suspending anything.
 dry_run = true
+
+# Where the agent writes its log. Only needed when there is no console to
+# write to -- which is the case on Windows, where the scheduled task runs
+# under pythonw.exe. install-agent.ps1 passes --log-file for you; set it
+# here or pass the flag if you start the agent some other way. With no
+# console and nothing configured, the agent falls back to
+# %PROGRAMDATA%\pcwake\pcwake.log (or $XDG_STATE_HOME/pcwake on Linux).
 
 # Windows only: pass /f to shutdown.exe, closing applications without asking.
 # Off by default, because a shutdown that did not happen is a smaller problem
