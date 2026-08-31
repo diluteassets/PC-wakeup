@@ -37,6 +37,59 @@ def _wait_for_port(port: int, timeout: float = 10.0) -> bool:
     return False
 
 
+class BrokerProcess:
+    """A Mosquitto the test controls, so a restart can be exercised the way a
+    Pi reboot or a package upgrade would cause one."""
+
+    def __init__(self, port: int, config_path) -> None:
+        self.port = port
+        self._config = config_path
+        self._process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        if self._process is not None:
+            return
+        self._process = subprocess.Popen(
+            [MOSQUITTO, "-c", str(self._config)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if not _wait_for_port(self.port):
+            stderr = (
+                self._process.stderr.read().decode(errors="replace")
+                if self._process.stderr
+                else ""
+            )
+            self._process.kill()
+            self._process = None
+            pytest.fail(f"mosquitto did not start on port {self.port}: {stderr}")
+
+    def stop(self) -> None:
+        """Kill it outright -- a graceful stop is not what a reboot looks
+        like, and the clients must cope with the abrupt version."""
+        if self._process is None:
+            return
+        self._process.kill()
+        self._process.wait(timeout=5)
+        self._process = None
+
+
+@pytest.fixture
+def restartable_broker(tmp_path) -> BrokerProcess:
+    """A broker under the test's control, for outage and recovery scenarios."""
+    if MOSQUITTO is None:
+        pytest.skip("mosquitto is not installed")
+    port = _free_port()
+    config = tmp_path / "mosquitto-restartable.conf"
+    config.write_text(
+        f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n"
+    )
+    process = BrokerProcess(port, config)
+    process.start()
+    yield process
+    process.stop()
+
+
 @pytest.fixture
 def broker(tmp_path) -> int:
     """A private Mosquitto on a free port, one per test.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import threading
 
+import aiomqtt
 import pytest
 
 from pcwake.agent.client import Agent
@@ -284,3 +285,45 @@ class TestTimeouts:
             await asyncio.wait_for(future, timeout=1.0)
         hub.state.pending.discard(command.id)
         assert len(hub.state.pending) == 0
+
+
+class TestBrokerRestart:
+    """A Pi reboot or a mosquitto upgrade is an ordinary event. Both halves
+    must come back on their own -- nobody is going to SSH into the PC to
+    restart an agent by hand."""
+
+    async def test_everything_recovers_with_no_intervention(self, restartable_broker):
+        port = restartable_broker.port
+        agent = RunningAgent(port, FakeBackend())
+        agent.start()
+        hub = RunningHub(port)
+        await hub.start()
+        try:
+            assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
+
+            restartable_broker.stop()
+            assert await wait_until(lambda: not hub.mqtt.connected, timeout=20)
+
+            # A command sent during the outage must fail cleanly and leave no
+            # waiter behind, or every outage leaks one.
+            from pcwake.common.protocol import Command
+
+            command = Command(action=Action.LOCK)
+            hub.state.pending.register(command.id)
+            with pytest.raises(aiomqtt.MqttError):
+                await hub.mqtt.publish_command(HOST, command)
+            hub.state.pending.discard(command.id)
+            assert len(hub.state.pending) == 0
+
+            restartable_broker.start()
+            assert await wait_until(lambda: hub.mqtt.connected, timeout=60)
+            # The agent re-announces itself on reconnect; nothing asks it to.
+            assert await wait_until(
+                lambda: hub.host.resolve() is HostState.ONLINE, timeout=90
+            ), "the agent never came back after the broker returned"
+
+            future = await send(hub, Action.LOCK)
+            assert (await asyncio.wait_for(future, timeout=15)).ok is True
+        finally:
+            await hub.stop()
+            agent.stop()
