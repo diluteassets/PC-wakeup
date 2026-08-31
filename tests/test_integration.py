@@ -327,3 +327,97 @@ class TestBrokerRestart:
         finally:
             await hub.stop()
             agent.stop()
+
+
+class TestRefusalAndFailureAfterAck:
+    """The paths that decide what the user is told when an action does not
+    go through -- the part of the ack-ordering design that has to earn its
+    keep when things go wrong rather than right."""
+
+    async def test_a_preflight_refusal_reaches_the_user_as_a_failure(
+        self, hub, broker
+    ):
+        """Preflight is the last moment a host-downing action can be refused.
+
+        Once the ack is flushed the machine is on its way down and the
+        outcome can no longer be reported, so anything we can tell in advance
+        must be caught here and come back as ok=False -- not as a cheerful
+        acknowledgement of a shutdown that never happens.
+        """
+
+        class RefusingBackend(FakeBackend):
+            def preflight(self, action):
+                from pcwake.agent.power import PowerActionError
+
+                raise PowerActionError("shutdown.exe not found on PATH")
+
+        running = RunningAgent(broker, RefusingBackend())
+        running.start()
+        try:
+            assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
+            future = await send(hub, Action.SHUTDOWN)
+            ack = await asyncio.wait_for(future, timeout=10)
+            assert ack.ok is False
+            assert "shutdown.exe" in ack.error
+            # And crucially the machine was never asked to go down.
+            assert running.backend.calls == []
+        finally:
+            running.stop()
+
+    async def test_preflight_is_not_consulted_for_lock(self, hub, broker):
+        # Lock keeps the host up, so its ack reports the real outcome and
+        # there is nothing preflight could add.
+        class RefusingBackend(FakeBackend):
+            def preflight(self, action):
+                from pcwake.agent.power import PowerActionError
+
+                raise PowerActionError("should not be consulted")
+
+        running = RunningAgent(broker, RefusingBackend())
+        running.start()
+        try:
+            assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
+            future = await send(hub, Action.LOCK)
+            ack = await asyncio.wait_for(future, timeout=10)
+            assert ack.ok is True
+            assert running.backend.calls == [Action.LOCK]
+        finally:
+            running.stop()
+
+    async def test_a_failure_after_the_ack_publishes_a_correction(self, hub, broker):
+        """We already said yes, so the outcome cannot change what the user was
+        told -- but the correction must still go out, for the log and for
+        anything watching the topic."""
+        acks: list = []
+
+        class FailingAfterAck(FakeBackend):
+            def perform(self, action):
+                from pcwake.agent.power import PowerActionError
+
+                raise PowerActionError("suspend rejected by the kernel")
+
+        running = RunningAgent(broker, FailingAfterAck(), action_delay=0.1)
+        running.start()
+        try:
+            assert await wait_until(lambda: hub.host.resolve() is HostState.ONLINE)
+
+            original = hub.state.pending.resolve
+
+            def record(ack):
+                acks.append(ack)
+                return original(ack)
+
+            hub.state.pending.resolve = record
+
+            future = await send(hub, Action.SLEEP)
+            first = await asyncio.wait_for(future, timeout=10)
+            assert first.ok is True, "the optimistic ack goes out first"
+
+            # The correction follows once the action actually fails.
+            assert await wait_until(lambda: len(acks) >= 2, timeout=10)
+            correction = acks[-1]
+            assert correction.ok is False
+            assert "suspend rejected" in correction.error
+            assert correction.id == first.id
+        finally:
+            running.stop()

@@ -585,3 +585,178 @@ class TestWakeFlow:
 
         await bot._wake(bot._config.default_host, BoolReturning())
         await asyncio.wait_for(asyncio.gather(*bot._spawned), timeout=5)  # must not raise
+
+
+class TestCommandHandlers:
+    """The thin layer between a typed slash command and the logic already
+    tested above. Thin, but it is what the user actually touches."""
+
+    async def test_status_replies_with_the_state_and_buttons(self):
+        bot = make_bot()
+        set_online(bot)
+        update, context = FakeUpdate(), FakeContext()
+        await bot.cmd_status(update, context)
+        assert "Online" in update.effective_message.replies[0]
+
+    async def test_help_lists_the_commands(self):
+        bot = make_bot()
+        update = FakeUpdate()
+        await bot.cmd_help(update, FakeContext())
+        text = update.effective_message.replies[0]
+        for command in ("/status", "/wake", "/sleep", "/lock", "/shutdown", "/restart"):
+            assert command in text
+
+    async def test_help_says_streaming_is_not_included(self):
+        # Setting the expectation up front is kinder than letting someone
+        # hunt for a feature that was deliberately left out.
+        bot = make_bot()
+        update = FakeUpdate()
+        await bot.cmd_help(update, FakeContext())
+        assert "RustDesk" in update.effective_message.replies[0]
+
+    async def test_remote_offers_the_configured_links(self):
+        bot = make_bot(
+            hosts=(
+                HostConfig(
+                    name="desk",
+                    mac="aa:bb:cc:dd:ee:ff",
+                    rustdesk_id="123456789",
+                    moonlight_host="192.168.1.50",
+                ),
+            )
+        )
+        update = FakeUpdate()
+        await bot.cmd_remote(update, FakeContext())
+        text = update.effective_message.replies[0]
+        assert "rustdesk://connect?id=123456789" in text
+        assert "moonlight://192.168.1.50" in text
+
+    async def test_remote_says_so_when_nothing_is_configured(self):
+        bot = make_bot()
+        update = FakeUpdate()
+        await bot.cmd_remote(update, FakeContext())
+        assert "Nothing configured" in update.effective_message.replies[0]
+
+    @pytest.mark.parametrize(
+        "handler_name", ["cmd_status", "cmd_wake", "cmd_sleep", "cmd_lock", "cmd_remote"]
+    )
+    async def test_an_unknown_host_is_named_rather_than_crashing(self, handler_name):
+        bot = make_bot()
+        set_online(bot)
+        update, context = FakeUpdate(), FakeContext(args=["laptop"])
+        await getattr(bot, handler_name)(update, context)
+        assert "Configured hosts" in update.effective_message.replies[0]
+
+    async def test_an_unauthorized_message_is_logged_and_not_answered(self, caplog):
+        # Silence to the sender is deliberate: the bot should not confirm it
+        # exists to someone who is not allowed to use it. The log is how the
+        # owner discovers their own chat id during setup.
+        bot = make_bot()
+        update = FakeUpdate(chat_id=OTHER_CHAT)
+        with caplog.at_level("WARNING"):
+            await bot.on_unauthorized(update, FakeContext())
+        assert str(OTHER_CHAT) in caplog.text
+        assert update.effective_message.replies == []
+
+    async def test_the_error_handler_logs_rather_than_propagating(self, caplog):
+        bot = make_bot()
+        context = FakeContext()
+        context.error = RuntimeError("something went wrong")
+        with caplog.at_level("ERROR"):
+            await bot.on_error(FakeUpdate(), context)
+        assert "something went wrong" in caplog.text
+
+
+class TestHandlerWiring:
+    """build() is where authorization is actually enforced.
+
+    Every command handler must carry the chat filter. One handler registered
+    without it would let anyone who finds the bot run that command -- and it
+    would look completely normal in the source.
+    """
+
+    def _application(self):
+        bot = make_bot()
+        with mock.patch("telegram.ext.ApplicationBuilder.build") as build:
+            app = mock.MagicMock()
+            app.handlers = {}
+            registered = []
+            app.add_handler.side_effect = lambda h, *a, **k: registered.append(h)
+            build.return_value = app
+            bot.build()
+        return bot, registered
+
+    @staticmethod
+    def _update_from(chat_id: int):
+        """A real Update, so the filter is exercised rather than inspected."""
+        import datetime as dt
+
+        from telegram import Chat, Message, Update, User
+
+        chat = Chat(id=chat_id, type=Chat.PRIVATE)
+        message = Message(
+            message_id=1,
+            date=dt.datetime.now(dt.timezone.utc),
+            chat=chat,
+            from_user=User(id=chat_id, first_name="T", is_bot=False),
+            text="/status",
+        )
+        return Update(update_id=1, message=message)
+
+    def test_every_command_handler_actually_rejects_a_foreign_chat(self):
+        """Behavioural, not structural.
+
+        An earlier version of this test asserted `handler.filters is not
+        None`. python-telegram-bot defaults that attribute to filters.ALL
+        rather than None, so the assertion held even for a handler registered
+        with no filter at all -- it passed while the bot was wide open. The
+        only trustworthy check is to run the filter against a chat that is
+        not on the allowlist.
+        """
+        from telegram.ext import CommandHandler
+
+        _, registered = self._application()
+        commands = [h for h in registered if isinstance(h, CommandHandler)]
+        assert commands, "no command handlers were registered"
+
+        allowed = self._update_from(ALLOWED_CHAT)
+        foreign = self._update_from(OTHER_CHAT)
+        for handler in commands:
+            assert handler.filters.check_update(allowed), (
+                f"{handler.commands} rejects the owner's own chat"
+            )
+            assert not handler.filters.check_update(foreign), (
+                f"{handler.commands} was registered without the chat filter, "
+                "so anyone who found the bot could run it"
+            )
+
+    def test_the_expected_commands_are_all_registered(self):
+        from telegram.ext import CommandHandler
+
+        _, registered = self._application()
+        names = set()
+        for handler in registered:
+            if isinstance(handler, CommandHandler):
+                names |= set(handler.commands)
+        assert {
+            "start", "help", "status", "wake", "sleep",
+            "lock", "shutdown", "restart", "remote",
+        } <= names
+
+    def test_a_callback_handler_is_registered_for_the_buttons(self):
+        from telegram.ext import CallbackQueryHandler
+
+        _, registered = self._application()
+        assert any(isinstance(h, CallbackQueryHandler) for h in registered)
+
+    def test_an_unauthorized_catch_all_is_registered_last(self):
+        # It exists so the owner can find their own chat id in the log during
+        # setup; registering it before the command handlers would swallow
+        # everything.
+        from telegram.ext import CommandHandler, MessageHandler
+
+        _, registered = self._application()
+        message_handlers = [i for i, h in enumerate(registered) if isinstance(h, MessageHandler)]
+        command_handlers = [i for i, h in enumerate(registered) if isinstance(h, CommandHandler)]
+        assert message_handlers, "no catch-all handler registered"
+        assert min(message_handlers) > max(command_handlers)
