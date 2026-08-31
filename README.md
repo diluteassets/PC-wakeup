@@ -118,6 +118,10 @@ Named scripts, CPU/RAM/disk metrics, file push and clipboard sync are v2, and
 deliberately have no scaffolding here yet. Remote desktop streaming is out of
 scope permanently.
 
+**[docs/ROADMAP.md](docs/ROADMAP.md)** has the reasoning: what v2 is, the
+condition it waits on, and the constraints from v1 that any of it has to
+respect.
+
 ## Licence
 
 MIT.
