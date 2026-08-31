@@ -21,6 +21,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-c", "--config", help="path to config.toml")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument(
+        "--log-file",
+        help="also write logs here (rotating). Used automatically when there "
+             "is no console, as when launched with pythonw.exe",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="log power commands instead of performing them",
@@ -34,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    pcwake_logging.setup(args.verbose)
+    pcwake_logging.setup(args.verbose, args.log_file)
 
     try:
         config = load_agent_config(args.config)

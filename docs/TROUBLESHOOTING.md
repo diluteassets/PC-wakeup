@@ -75,12 +75,18 @@ Exactly what it says: the PC answers pings, the agent is not connected. This
 is a service problem, not a wake problem — do not go back to the BIOS.
 
 ```powershell
-Get-ScheduledTask -TaskName pcwake-agent        # Windows
+Get-ScheduledTask -TaskName pcwake-agent            # Windows
+Get-Content -Wait "$env:ProgramData\pcwake\agent.log"
 ```
 ```bash
-systemctl status pcwake-agent                   # Linux
+systemctl status pcwake-agent                       # Linux
 journalctl -u pcwake-agent -n 50
 ```
+
+On Windows the agent runs under `pythonw.exe`, which has no console, so the
+log file is the only place its output goes. `install-agent.ps1` sets it up;
+if you started the agent some other way, pass `--log-file` or it will have
+nowhere to write.
 
 On Windows this is *expected* between boot and logon: the agent starts at
 logon, because locking the screen needs an interactive session.
@@ -276,6 +282,12 @@ Turn on debug logging on both sides:
 ```bash
 pcwake-hub -v
 pcwake-agent -v
+```
+
+On Windows, where there is no console to watch:
+
+```powershell
+python -m pcwake.agent -c "$env:ProgramData\pcwake\config.toml" -v --log-file agent-debug.log
 ```
 
 Then reproduce with the `mosquitto_sub` window open. Between the two logs and

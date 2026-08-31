@@ -18,9 +18,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("-c", "--config", help="path to config.toml")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser.add_argument("--log-file", help="also write logs here (rotating)")
     args = parser.parse_args(argv)
 
-    pcwake_logging.setup(args.verbose)
+    pcwake_logging.setup(args.verbose, args.log_file)
 
     try:
         config = load_hub_config(args.config)

@@ -18,6 +18,7 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath = "$env:ProgramData\pcwake\config.toml",
+    [string]$LogPath = "$env:ProgramData\pcwake\agent.log",
     [string]$PythonPath = "",
     [string]$TaskName = "pcwake-agent"
 )
@@ -44,8 +45,11 @@ if (-not (Test-Path $ConfigPath)) {
 Write-Host "Python: $PythonPath"
 Write-Host "Config: $ConfigPath"
 
-# pythonw keeps the agent from flashing a console window at every logon.
-$arguments = "-m pcwake.agent --config `"$ConfigPath`""
+# pythonw keeps the agent from flashing a console window at every logon. It
+# also means there is no console for logs to go to, so pass an explicit log
+# file -- otherwise every line would be discarded and the agent would be
+# impossible to diagnose.
+$arguments = "-m pcwake.agent --config `"$ConfigPath`" --log-file `"$LogPath`""
 $action = New-ScheduledTaskAction -Execute $PythonPath -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 
@@ -85,6 +89,9 @@ Write-Host ""
 Write-Host "Installed and started '$TaskName'."
 Write-Host "Check it:   Get-ScheduledTask -TaskName $TaskName"
 Write-Host "Remove it:  Unregister-ScheduledTask -TaskName $TaskName"
+Write-Host ""
+Write-Host "Log file:   $LogPath"
+Write-Host "Follow it:  Get-Content -Wait `"$LogPath`""
 Write-Host ""
 Write-Host "Now run the setup checks:"
 Write-Host "  python -m pcwake.agent --config `"$ConfigPath`" doctor"
